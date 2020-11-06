@@ -4,8 +4,10 @@
     <TargetFramework>netstandard2.1</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Updater.Event.cs">
-      <DependentUpon>Updater.cs</DependentUpon>
-    </Compile>
+    <ProjectCapability Include="DynamicDependentFile" />
+    <ProjectCapability Include="DynamicFileNesting" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Iwenli.Core\Iwenli.Core.csproj" />
   </ItemGroup>
 </Project>
