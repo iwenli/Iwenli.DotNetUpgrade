@@ -26,6 +26,8 @@ namespace Iwenli.DotNetUpgrade.Core
         private string _md5;
         private long _packageSize;
         private string _updatePingUrl;
+        private string _packagePassword;
+        private bool _requreAdminstrorPrivilege;
 
         //bool _autoEndProcessesWithinAppDir;
         ///// <summary>
@@ -211,6 +213,35 @@ namespace Iwenli.DotNetUpgrade.Core
                     return;
                 _updatePingUrl = value;
                 OnPropertyChanged(nameof(UpdatePingUrl));
+            }
+        }
+
+        /// <summary>
+        /// 升级包密码
+        /// </summary>
+        public string PackagePassword
+        {
+            get { return _packagePassword; }
+            set
+            {
+                if (value == _packagePassword)
+                    return;
+                _packagePassword = value;
+                OnPropertyChanged(nameof(PackagePassword));
+            }
+        }
+
+        /// <summary>
+        /// 强行请求Administrator权限
+        /// </summary>
+        public bool RequreAdminstrorPrivilege
+        {
+            get { return _requreAdminstrorPrivilege; }
+            set
+            {
+                if (value.Equals(_requreAdminstrorPrivilege)) return;
+                _requreAdminstrorPrivilege = value;
+                OnPropertyChanged(nameof(RequreAdminstrorPrivilege));
             }
         }
 

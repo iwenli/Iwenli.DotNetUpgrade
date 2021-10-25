@@ -18,7 +18,18 @@ namespace Iwenli.DotNetUpgrade.Core
 
         TextWriterTraceListener _logger;
         private string _applicationDirectory;
-        string _updateMetaFilePath;
+        private string _updateMetaFilePath;
+        private bool _forceUpdate;
+        private bool _mustUpdate;
+        private bool _autoKillProcesses;
+        private bool _autoEndProcessesWithinAppDir;
+        private string _updatePackageListPath;
+        private string _updatePackagePath;
+        private string _updateNewFilePath;
+        private string _preserveFileListPath;
+        private string _logFile;
+        private bool _autoExitCurrentProcess;
+
         //private bool _autoEndProcessesWithinAppDir;
 
         public UpdateContext(params Server[] servers)
@@ -37,16 +48,16 @@ namespace Iwenli.DotNetUpgrade.Core
             ComponentStatus = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
 
             //如果当前启动路径位于TEMP目录下，则处于临时路径模式
-            var temppath = System.IO.Path.GetTempPath();
+            var temppath = Path.GetTempPath();
             var assemblyPath = Assembly.GetExecutingAssembly().Location;
             if (assemblyPath.IndexOf(temppath, StringComparison.OrdinalIgnoreCase) != -1)
             {
-                UpdateTempRoot = System.IO.Path.GetDirectoryName(assemblyPath);
+                UpdateTempRoot = Path.GetDirectoryName(assemblyPath);
                 IsInUpdateMode = true;
             }
             else
             {
-                UpdateTempRoot = System.IO.Path.Combine(temppath, Guid.NewGuid().ToString());
+                UpdateTempRoot = Path.Combine(temppath, Guid.NewGuid().ToString());
                 IsInUpdateMode = false;
 
                 //尝试自动加载升级属性
@@ -174,7 +185,6 @@ namespace Iwenli.DotNetUpgrade.Core
         /// </summary>
         public bool IsInUpdateMode { get; private set; }
 
-        bool _forceUpdate;
         /// <summary>
         /// 获得或设置是否不经提示便自动更新
         /// </summary>
@@ -183,7 +193,6 @@ namespace Iwenli.DotNetUpgrade.Core
             get { return _forceUpdate || (UpdateMeta != null && UpdateMeta.ForceUpdate); }
             set { _forceUpdate = value; }
         }
-        bool _mustUpdate;
         /// <summary>
         /// 获得是否强制更新，否则退出
         /// </summary>
@@ -193,7 +202,6 @@ namespace Iwenli.DotNetUpgrade.Core
             set { _mustUpdate = value; }
         }
 
-        bool _autoKillProcesses;
         /// <summary>
         /// 获得或设置是否在更新时自动结束进程
         /// </summary>
@@ -202,7 +210,6 @@ namespace Iwenli.DotNetUpgrade.Core
             get { return _autoKillProcesses || (UpdateMeta != null && UpdateMeta.AutoKillProcesses); }
             set { _autoKillProcesses = value; }
         }
-        bool _autoEndProcessesWithinAppDir;
         /// <summary>
         /// 获得或设置一个值，指示着当自动更新的时候是否将应用程序目录中的所有进程都作为主进程请求结束
         /// </summary>
@@ -211,7 +218,6 @@ namespace Iwenli.DotNetUpgrade.Core
             get { return _autoEndProcessesWithinAppDir || (UpdateMeta != null && UpdateMeta.AutoEndProcessesWithinAppDir); }
             set { _autoEndProcessesWithinAppDir = value; }
         }
-        string _updatePackageListPath;
         /// <summary> 获得当前要下载的包文件信息保存的路径 </summary>
         /// <value></value>
         /// <remarks></remarks>
@@ -220,8 +226,6 @@ namespace Iwenli.DotNetUpgrade.Core
             get { return _updatePackageListPath ??= Path.Combine(UpdateTempRoot, "packages.xml"); }
         }
 
-
-        string _updatePackagePath;
         /// <summary> 获得当前下载的包文件目录 </summary>
         /// <value></value>
         /// <remarks></remarks>
@@ -230,7 +234,15 @@ namespace Iwenli.DotNetUpgrade.Core
             get { return _updatePackagePath ??= Path.Combine(UpdateTempRoot, "packages"); }
         }
 
-        string _preserveFileListPath;
+        /// <summary> 获得当前下载解包后的新文件路径 </summary>
+        /// <value></value>
+        /// <remarks></remarks>
+        public string UpdateNewFilePath
+        {
+            get { return _updateNewFilePath ??= Path.Combine(UpdateTempRoot, "files"); }
+        }
+
+
         /// <summary> 获得当前要保留的文件信息保存的路径 </summary>
         /// <value></value>
         /// <remarks></remarks>
@@ -239,6 +251,19 @@ namespace Iwenli.DotNetUpgrade.Core
             get { return _preserveFileListPath ??= Path.Combine(UpdateTempRoot, "reservefile.xml"); }
         }
 
+        /// <summary>
+		/// 获得更新程序是否已经成功启动了
+		/// </summary>
+		public bool? IsUpdaterSuccessfullyStarted { get; internal set; }
+
+        /// <summary>
+        /// 获得或设置是否自动退出当前进程
+        /// </summary>
+        public bool AutoExitCurrentProcess
+        {
+            get { return _autoExitCurrentProcess || (UpdateMeta != null && UpdateMeta.AutoExitCurrentProcess); }
+            set { _autoExitCurrentProcess = value; }
+        }
 
 
         /// <summary> 获得指定下载包的完整路径 </summary>
@@ -250,12 +275,46 @@ namespace Iwenli.DotNetUpgrade.Core
             return (UpdateMetaFileUrl.Substring(0, UpdateMetaFileUrl.LastIndexOf("/") + 1) + packageName);
         }
 
+        #region Loging
+        /// <summary> 获得或设置日志文件名 </summary>
+		/// <value></value>
+		/// <remarks></remarks>
+		public string LogFile
+        {
+            get { return _logFile; }
+            set
+            {
+                if (string.Compare(_logFile, value, true) == 0) return;
+
+                _logFile = value;
+                if (_logger != null)
+                {
+                    _logger.Close();
+                    Trace.Listeners.Remove(_logger);
+                }
+                if (!string.IsNullOrEmpty(_logFile))
+                {
+                    if (!Path.IsPathRooted(_logFile)) _logFile = Environment.ExpandEnvironmentVariables("%TEMP%\\" + _logFile);
+
+                    if (File.Exists(_logFile)) File.Delete(_logFile);
+                    Directory.CreateDirectory(Path.GetDirectoryName(_logFile));
+
+                    _logger = new TextWriterTraceListener(_logFile)
+                    {
+                        TraceOutputOptions = TraceOptions.DateTime
+                    };
+                    Trace.Listeners.Add(_logger);
+                }
+            }
+        }
+        #endregion
+
         #region HttpClient
 
         /// <summary> 获得或设置服务器用户名密码标记 </summary>
         /// <value></value>
         /// <remarks></remarks>
-        public System.Net.NetworkCredential NetworkCredential { get; set; }
+        public NetworkCredential NetworkCredential { get; set; }
 
         /// <summary> 获得或设置用于下载的代理服务器地址 </summary>
         /// <value></value>

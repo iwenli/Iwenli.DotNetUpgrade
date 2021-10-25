@@ -9,6 +9,7 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 
@@ -27,19 +28,110 @@ namespace Iwenli.DotNetUpgrade
 		/// <param name="appVersion">指定的应用程序版本</param>
 		/// <param name="appDirectory">指定的应用程序路径</param>
 		/// <param name="servers">更新包所在服务器信息</param>
-        protected Updater(Version appVersion = null, string appDirectory = null, params Server[] servers)
+        protected Updater(Version appVersion = null, string appDirectory = null, params Server[] servers) : this()
         {
             if (appVersion != null)
                 Context.CurrentVersion = appVersion;
             if (!string.IsNullOrEmpty(appDirectory))
                 Context.ApplicationDirectory = appDirectory;
 
-            Trace.AutoFlush = true;
             Context = new UpdateContext(servers);
-            Packages = new List<Package>();
         }
 
+        protected Updater()
+        {
+            Trace.AutoFlush = true;
+            Packages = new List<Package>();
 
+            UpdatesFound += Instance_UpdatesFound;
+            if (_instance == null) _instance = this;
+
+            //初始化工作参数
+            InitializeParameters();
+        }
+
+        #region Dispose 模式
+
+        bool _disposed;
+
+        /// <summary>
+        /// 释放
+        /// </summary>
+        /// <param name="disposing">是否是主动调用</param>
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed) return;
+
+            _disposed = true;
+
+            if (disposing)
+            {
+                Context.LogFile = null;
+            }
+        }
+
+        /// <summary>
+        /// 释放资源
+        /// </summary>
+        public void Dispose()
+        {
+            Dispose(true);
+        }
+
+        ~Updater()
+        {
+            Dispose(false);
+        }
+
+        #endregion
+
+        /// <summary>
+        /// 初始化工作参数
+        /// </summary>
+        void InitializeParameters()
+        {
+            var args = Environment.GetCommandLineArgs();
+            if (args.Length < 2 || (args[1] != "/startupdate" && args[1] != "/selfupdate")) return;
+
+            var index = 2;
+            while (index < args.Length)
+            {
+                var name = args[index++];
+                switch (name)
+                {
+                    //case "/ui":
+                    //    Context.UpdateMainFormType = args[index++];
+                    //    break;
+                    case "/assembly":
+                        LoadExtraAssemblies(args[index++]);
+                        break;
+                    case "/cv": Context.CurrentVersion = new Version(args[index++]); break;
+                    case "/ad": Context.ApplicationDirectory = args[index++]; break;
+                    case "/url": Context.UpdateMetaFileUrl = args[index++]; break;
+                    case "/proxy": Context.ProxyAddress = args[index++]; break;
+                    case "/cred":
+                        var value = args[index++];
+                        if (!string.IsNullOrEmpty(value))
+                        {
+                            var info = value.Split(':');
+                            if (info.Length == 2 && !string.IsNullOrEmpty(info[0]))
+                            {
+                                Context.NetworkCredential = new NetworkCredential(info[0], info[1]);
+                            }
+                        }
+                        break;
+                    case "/p":
+                        var pi = args[index++];
+                        if (pi.StartsWith("*")) Context.ExternalProcessID.Add(int.Parse(pi.Remove(0, 1)));
+                        else Context.ExternalProcessName.Add(pi);
+                        break;
+                    case "/log": Context.LogFile = args[index++]; break;
+                    case "/forceupdate": Context.ForceUpdate = true; break;
+                    case "/autokill": Context.AutoKillProcesses = true; break;
+                        //case "/noui": Context.HiddenUI = true; break;
+                }
+            }
+        }
         #region 检测更新
 
         int _serverIndex = 0;
@@ -91,10 +183,10 @@ namespace Iwenli.DotNetUpgrade
                 }
                 else if (!Context.HasUpdate)
                 {
-                    OnNoFound();
+                    OnNoUpdatesFound();
                 }
-                else OnFound();
-                OnCheckCompleted();
+                else OnUpdatesFound();
+                OnCheckUpdateComplete();
             };
             bgw.ProgressChanged += (s, e) => OnOperationProgressChanged(e);
             Context.IsInUpdating = true;
@@ -119,7 +211,7 @@ namespace Iwenli.DotNetUpgrade
                 if (File.Exists(localFile))
                 {
                     Trace.TraceInformation("正在读取本地升级信息文件 [" + localFile + "]");
-                    Context.UpdateMetaTextContent = File.ReadAllText(localFile, System.Text.Encoding.UTF8);
+                    Context.UpdateMetaTextContent = File.ReadAllText(localFile, Encoding.UTF8);
                 }
                 else
                 {
@@ -251,7 +343,7 @@ namespace Iwenli.DotNetUpgrade
                 Context.Exception = ex;
                 Trace.TraceWarning("检测更新信息失败：" + ex.Message, ex.ToString());
                 OnError();
-                OnCheckCompleted();
+                OnCheckUpdateComplete();
             }
         }
         #region 确定要下载的包
@@ -415,7 +507,7 @@ namespace Iwenli.DotNetUpgrade
                 if (!DownloadPackages(e)) return;
 
                 //解压缩升级包
-                ExtractPackage(e);
+                ExtractPackage((BackgroundWorker)sender, e);
             }
             catch (Exception ex)
             {
@@ -426,6 +518,7 @@ namespace Iwenli.DotNetUpgrade
             }
             throw new NotImplementedException();
         }
+
         #region 更新包下载
 
         #region 公共属性
@@ -450,7 +543,6 @@ namespace Iwenli.DotNetUpgrade
         /// <remarks></remarks>
         public int DownloadingPackageCount => Packages.Count(m => m.IsDownloading);
         #endregion
-
 
         /// <summary> 执行下载 </summary>
         bool DownloadPackages(DoWorkEventArgs e)
@@ -480,8 +572,8 @@ namespace Iwenli.DotNetUpgrade
             Trace.TraceInformation("正在初始化 {0} 个WebClient", workerCount);
             for (var i = 0; i < workerCount; i++)
             {
-                var clnt = Context.CreateWebClient();
-                clnt.DownloadFileCompleted += (s, e) =>
+                var client = Context.CreateWebClient();
+                client.DownloadFileCompleted += (s, e) =>
                 {
                     var pkg = e.UserState as Package;
                     var cnt = s as WebClient;
@@ -521,33 +613,32 @@ namespace Iwenli.DotNetUpgrade
 
                     lock (Packages)
                     {
-                        Trace.TraceInformation($"包【{pkg.Name}】下载操作完成：{(pkg.IsDownloaded ? "下载成功" : "下载失败")}" + );
+                        Trace.TraceInformation($"包【{pkg.Name}】下载操作完成：{(pkg.IsDownloaded ? "下载成功" : "下载失败")}");
                         evt.Set();
                     }
                 };
-                clnt.DownloadProgressChanged += (s, e) =>
+                client.DownloadProgressChanged += (s, e) =>
                 {
-                    var pkg = e.UserState as PackageInfo;
+                    var pkg = e.UserState as Package;
                     pkg.DownloadedSize = e.BytesReceived;
-                    pkg.PackageSize = e.TotalBytesToReceive > 0 ? e.TotalBytesToReceive : pkg.PackageSize;
-                    rt.PostEvent(DownloadProgressChanged, this,
-                                 new PackageDownloadProgressChangedEventArgs(pkg, pkg.PackageSize,
+                    pkg.Size = e.TotalBytesToReceive > 0 ? e.TotalBytesToReceive : pkg.Size;
+                    OnDownloadProgressChanged(new PackageDownloadProgressChangedEventArgs(pkg, pkg.Size,
                                                                              pkg.DownloadedSize, e.ProgressPercentage));
                 };
-                workers.Add(clnt);
+                workers.Add(client);
             }
 
             //开始处理事务
             while (!hasError)
             {
                 var breakFlag = false;
-                lock (PackagesToUpdate)
+                lock (Packages)
                 {
                     //没有错误，则分配下个任务
                     WebClient client;
                     while ((client = workers.Find(s => !s.IsBusy)) != null)
                     {
-                        var nextPkg = PackagesToUpdate.Find(s => !s.IsDownloading && !s.IsDownloaded);
+                        var nextPkg = Packages.Find(s => !s.IsDownloading && !s.IsDownloaded);
                         if (nextPkg == null)
                         {
                             breakFlag = true;
@@ -555,10 +646,10 @@ namespace Iwenli.DotNetUpgrade
                         }
 
                         nextPkg.IsDownloading = true;
-                        Trace.TraceInformation("包【" + nextPkg.PackageName + "】开始下载");
-                        rt.PostEvent(PackageDownload, this, new PackageEventArgs(nextPkg));
+                        Trace.TraceInformation($"包【{nextPkg.Name}】开始下载");
+                        OnPackageDownload(new PackageEventArgs(nextPkg));
                         Context.ResetWebClient(client);
-                        client.DownloadFileAsync(new Uri(Context.GetUpdatePackageFullUrl(nextPkg.PackageName)), nextPkg.LocalSavePath, nextPkg);
+                        client.DownloadFileAsync(new Uri(Context.GetUpdatePackageFullUrl(nextPkg.Name)), nextPkg.LocalSavePath, nextPkg);
                     }
                 }
                 if (breakFlag) break;
@@ -574,7 +665,7 @@ namespace Iwenli.DotNetUpgrade
                     Trace.TraceWarning("出现错误，正在取消所有包的下载队列");
                     workers.ForEach(s => s.CancelAsync());
                 }
-                lock (PackagesToUpdate)
+                lock (Packages)
                 {
                     Trace.TraceInformation("等待下载队列完成操作");
                     if (workers.FindIndex(s => s.IsBusy) == -1) break;
@@ -583,16 +674,125 @@ namespace Iwenli.DotNetUpgrade
             }
             Trace.TraceInformation("完成下载网络更新包");
 
-            var errorPkgs = ExtensionMethod.ToList(ExtensionMethod.Where(PackagesToUpdate, s => s.LastError != null));
+            var errorPkgs = Packages.FindAll(m => m.LastError != null);
             if (errorPkgs.Count > 0) throw new PackageDownloadException(errorPkgs.ToArray());
 
             return !hasError;
         }
 
         #endregion
+
+        #region 解压安装包
+
+        /// <summary>
+        /// 解压安装包
+        /// </summary>
+        void ExtractPackage(BackgroundWorker worker, DoWorkEventArgs e111)
+        {
+            Trace.TraceInformation("开始解压缩升级包");
+            OnPackageExtractionBegin(new PackageEventArgs(null));
+
+            var count = Packages.Count;
+            var index = 0;
+            var fze = new ICCEmbedded.SharpZipLib.Zip.FastZipEvents();
+            fze.ProcessFile += (s, e) => worker.ReportProgress(Utility.GetPercentProgress(index, count), $"正在解压缩：{e.Name}");
+            var fz = new ICCEmbedded.SharpZipLib.Zip.FastZip(fze);
+            if (!string.IsNullOrEmpty(Context.UpdateMeta.PackagePassword))
+            {
+                fz.Password = Context.UpdateMeta.PackagePassword;
+            }
+
+            foreach (var pkg in Packages)
+            {
+                index++;
+
+                Trace.TraceInformation("正在解压缩 " + pkg.Name);
+                OnPackageExtractionBegin(new PackageEventArgs(pkg));
+
+                fz.ExtractZip(pkg.LocalSavePath, Context.UpdateNewFilePath, null);
+
+                OnPackageExtractionEnd(new PackageEventArgs(pkg));
+                Trace.TraceInformation("完成解压缩 " + pkg.Name);
+            }
+
+            OnPackageExtractionEnd(new PackageEventArgs(null));
+            Trace.TraceInformation("完成解压缩升级包");
+        }
         #endregion
 
-        #region 外部更新进程
+        #endregion
+
+        #region 额外调用
+
+        /// <summary>
+        /// 加载额外调用
+        /// </summary>
+        /// <param name="namelist"></param>
+        void LoadExtraAssemblies(string namelist)
+        {
+            var assFiles = namelist.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var assFile in assFiles)
+            {
+                Trace.TraceInformation($"开始尝试加载文件 '{assFile}'....");
+
+                try
+                {
+                    var path = Path.Combine(Context.UpdateTempRoot, assFile);
+                    var assembly = System.Reflection.Assembly.LoadFile(path);
+
+                    Trace.TraceInformation("程序集已加载,检查通知接口...");
+                    //检查接口调用
+                    var types = assembly.GetTypes();
+                    foreach (var type in types)
+                    {
+                        //if (type.GetInterface(typeof(IUpdateNotify).FullName) != null)
+                        //{
+                        //    Trace.TraceInformation("IUpdateNotify detected. Create object instance and invoke Init() method.");
+
+                        //    var obj = Activator.CreateInstance(type) as IUpdateNotify;
+                        //    obj.Init(this);
+                        //}
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceError("file loading failed. error: " + ex.ToString());
+                }
+                Trace.TraceInformation("ending loading file '" + assFile + "'....");
+            }
+        }
+
+        List<Assembly> _usingAssemblies;
+        Type _mainFormType;
+
+        /// <summary>
+        /// 引用指定的程序集
+        /// </summary>
+        /// <param name="assemblies"></param>
+        public void UsingAssembly(params Assembly[] assemblies)
+        {
+            (_usingAssemblies ??= new List<Assembly>()).AddRange(assemblies);
+        }
+        #endregion
+
+
+        #region 启动外部更新进程
+
+        /// <summary>
+        /// 确保更新已经启动
+        /// </summary>
+        internal void EnsureUpdateStarted()
+        {
+            if ((Context.IsUpdaterSuccessfullyStarted == true && Context.AutoExitCurrentProcess) ||
+                (Context.IsUpdaterSuccessfullyStarted == false && Context.MustUpdate))
+            {
+                //启动成功，而且指定了自动解除当前进程时，则自动退出
+                //启动失败，但是要求强行更新时，则退出
+                TerminateProcess(this);
+            }
+        }
+
         /// <summary>
         /// 强行中止当前进程
         /// </summary>
@@ -604,6 +804,241 @@ namespace Iwenli.DotNetUpgrade
                 return;
 
             Environment.Exit(exitCode);
+        }
+
+
+        /// <summary>
+        /// 复制更新程序到临时目录并启动
+        /// </summary>
+        bool CopyAndStartUpdater(string[] ownerProcessList)
+        {
+            //写入更新文件
+            var updateinfoFile = Context.UpdateMetaFilePath;
+            Directory.CreateDirectory(Path.GetDirectoryName(updateinfoFile));
+            File.WriteAllText(updateinfoFile, Context.UpdateMetaTextContent, Encoding.UTF8);
+            //写入包列表
+            SerializeHelper.XmlSerilizeToFile(Packages, Context.UpdatePackageListPath);
+            SerializeHelper.XmlSerilizeToFile(FileInstaller.PreservedFiles.Keys.ToList(), Context.PreserveFileListPath);
+
+            //启动外部程序
+            var currentAssembly = Assembly.GetExecutingAssembly();
+            if (CopyAssemblyToUpdateRoot(currentAssembly) == null)
+            {
+                throw new Exception("未能生成临时辅助更新文件");
+            }
+
+            var tempExePath = Path.Combine(Context.UpdateTempRoot, Path.GetFileName(currentAssembly.Location));
+
+#if !STANDALONE
+            tempExePath = Path.Combine(Context.UpdateTempRoot, "AutoUpdater.exe");
+            //TODO:(Iwenli) System.IO.File.WriteAllBytes(tempExePath, ExtensionMethod.Decompress(Properties.Resources.FSLib_App_Utilities_exe));
+#endif
+            //写入配置文件。以便于多Framework支持。。
+            //System.IO.File.WriteAllBytes(tempExePath + ".config", Properties.Resources.appconfig);
+
+            //生成新的日志地址
+            var logPath = "";
+            if (!string.IsNullOrEmpty(Context.LogFile))
+            {
+                logPath = Path.Combine(
+                         Path.GetDirectoryName(Context.LogFile),
+                         Path.GetFileNameWithoutExtension(Context.LogFile) + "_1" +
+                         Path.GetExtension(Context.LogFile)
+                );
+            }
+
+            //启动
+            var sb = new StringBuilder(0x400);
+            sb.AppendFormat("/startupdate /cv \"{0}\" ", Context.CurrentVersion.ToString());
+            sb.AppendFormat("/log \"{0}\" ", Utility.SafeQuotePathInCommandLine(logPath));
+            sb.AppendFormat("/ad \"{0}\" ", Utility.SafeQuotePathInCommandLine(Context.ApplicationDirectory));
+            sb.AppendFormat("/url \"{0}\" ", Context.UpdateMetaFileUrl);
+            sb.AppendFormat("/proxy \"{0}\" ", Context.ProxyAddress ?? "");
+            if (Context.NetworkCredential != null)
+                sb.AppendFormat("/cred \"{0}\" ", string.Format("{0}:{1}", Context.NetworkCredential.UserName, Context.NetworkCredential.Password));
+            if (Context.AutoKillProcesses) sb.Append("/autokill ");
+            if (Context.ForceUpdate) sb.Append("/forceupdate ");
+            //if (Context.HiddenUI) sb.Append("/noui ");
+            //if (_mainFormType != null)
+            //{
+            //    CopyAssemblyToUpdateRoot(_mainFormType.Assembly);
+            //    sb.Append("/ui \"" + _mainFormType.AssemblyQualifiedName + "\" ");
+
+            //    if (!(_usingAssemblies ?? (_usingAssemblies = new List<Assembly>())).Contains(_mainFormType.Assembly))
+            //        _usingAssemblies.Add(_mainFormType.Assembly);
+            //}
+            if (_usingAssemblies != null && _usingAssemblies.Count > 0)
+            {
+                var assemblyNames = new List<string>();
+                foreach (var assembly in _usingAssemblies)
+                {
+                    if (CopyAssemblyToUpdateRoot(assembly) == true)
+                        assemblyNames.Add(System.IO.Path.GetFileName(assembly.Location));
+                }
+                if (assemblyNames.Count > 0)
+                {
+                    sb.Append("/assembly \"" + string.Join(";", assemblyNames.ToArray()) + "\" ");
+                }
+            }
+
+            FetchProcessList(ownerProcessList).ForEach(s => sb.AppendFormat("/p \"{0}\" ", s));
+
+            var psi = new ProcessStartInfo(tempExePath, sb.ToString())
+            {
+                UseShellExecute = true
+            };
+            //检测是否要管理员权限
+            if (Environment.OSVersion.Version.Major > 5 && (Context.UpdateMeta.RequreAdminstrorPrivilege || !EnsureAdminPrivilege()))
+                psi.Verb = "runas";
+
+            OnExternalUpdateStart();
+
+            Trace.TraceInformation("启动外部更新进程, 路径=" + psi.FileName + ", 参数=" + psi.Arguments);
+            try
+            {
+                Process.Start(psi);
+                OnExternalUpdateStarted();
+            }
+            catch (Exception ex)
+            {
+                Context.Exception = ex;
+                OnUpdateCancelled();
+
+                return false;
+            }
+
+            return true;
+        }
+
+        readonly Dictionary<Assembly, string> _assemblies = new Dictionary<Assembly, string>();
+
+        /// <summary>
+        /// 复制指定程序集到目录
+        /// </summary>
+        /// <param name="assembly"></param>
+        bool? CopyAssemblyToUpdateRoot(Assembly assembly)
+        {
+            if (_assemblies.ContainsKey(assembly))
+                return true;
+
+            var location = assembly.Location;
+            if (!location.StartsWith(Context.ApplicationDirectory, StringComparison.OrdinalIgnoreCase)) return false;
+
+            var dest = Path.Combine(Context.UpdateTempRoot, Path.GetFileName(location));
+            Trace.TraceInformation(string.Format("复制引用程序集 {0} 到 {1}", location, dest));
+            File.Copy(location, dest, true);
+            _assemblies.Add(assembly, null);
+
+            //如果有pdb文件, 那么也复制 
+            location = Path.ChangeExtension(location, "pdb");
+            if (File.Exists(location))
+            {
+                Trace.TraceInformation(string.Format("复制PDB文件 {0} 到 {1}", location, dest));
+                dest = Path.ChangeExtension(dest, "pdb");
+                File.Copy(location, dest, true);
+            }
+
+            foreach (var referencedAssembly in assembly.GetReferencedAssemblies())
+            {
+                Trace.TraceInformation("检测程序集引用..." + referencedAssembly.FullName);
+                try
+                {
+                    if (CopyAssemblyToUpdateRoot(Assembly.Load(referencedAssembly)) == null)
+                        return null;
+                }
+                catch (Exception ex)
+                {
+
+                    Trace.TraceError("检测程序集引用异常 : " + ex.ToString());
+                    return null;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 确认当前用户对当前目录是否具有操作权限
+        /// </summary>
+        /// <returns></returns>
+        bool EnsureAdminPrivilege()
+        {
+            var root = Context.ApplicationDirectory;
+            var tempfile = Path.Combine(root, DateTime.Now.Ticks + ".tmp");
+            Trace.TraceInformation("检查当前进程是否可以在没有管理员权限的情况下直接写入应用程序目录.");
+            try
+            {
+                File.Create(tempfile).Close();
+                File.Delete(tempfile);
+                Trace.TraceInformation("权限检查完成，无需管理员权限.");
+
+                return true;
+            }
+            catch (Exception)
+            {
+                Trace.TraceInformation("没有权限。执行操作所需的管理员权限，使用 /runas 执行更新.");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 获得自动更新所需要结束的进程列表
+        /// </summary>
+        /// <param name="ownerProcess"></param>
+        /// <returns></returns>
+        List<string> FetchProcessList(string[] ownerProcess)
+        {
+            var list = new List<string>();
+            var mainProcessID = Process.GetCurrentProcess().Id;
+            list.Add("*" + mainProcessID);
+            list.AddRange(Context.ExternalProcessID.Select(m => "*" + m));
+            if (Context.AutoEndProcessesWithinAppDir)
+            {
+                static string pathLookup(Process _)
+                {
+                    try
+                    {
+                        return _.MainModule.FileName;
+                    }
+                    catch (Exception)
+                    {
+                        return string.Empty;
+                    }
+                }
+                //获得所有进程
+                var processes = Process.GetProcesses();
+                //查找当前目录下的进程, 并加入到列表
+                foreach (var s in processes)
+                {
+                    if (!Context.ExternalProcessID.Contains(s.Id) && s.Id != mainProcessID && pathLookup(s).StartsWith(Context.ApplicationDirectory, StringComparison.OrdinalIgnoreCase))
+                        list.Add("*" + s.Id);
+                }
+            }
+
+            if (ownerProcess != null) list.AddRange(ownerProcess);
+
+            return list;
+        }
+
+        /// <summary>
+        /// 启动进程外更新程序
+        /// </summary>
+        /// <param name="ownerProcess">主进程列表</param>
+        public bool StartExternalUpdater(string[] ownerProcess)
+        {
+            var result = CopyAndStartUpdater(ownerProcess);
+            Context.IsUpdaterSuccessfullyStarted = result;
+
+            return result;
+
+        }
+
+        /// <summary>
+        /// 启动进程外更新程序
+        /// </summary>
+        public bool StartExternalUpdater()
+        {
+            return StartExternalUpdater(null);
         }
         #endregion
 
@@ -636,13 +1071,5 @@ namespace Iwenli.DotNetUpgrade
         }
 
         #endregion
-
-
-        public void Dispose()
-        {
-            throw new NotImplementedException();
-        }
-
-
     }
 }

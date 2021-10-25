@@ -43,23 +43,24 @@ namespace Iwenli.DotNetUpgrade
         /// <summary>
         /// 发现了更新
         /// </summary>
-        public event EventHandler Found;
+        public event EventHandler UpdatesFound;
         /// <summary>
-        /// 引发 <see cref="Found"/> 事件
+        /// 引发 <see cref="UpdatesFound"/> 事件
         /// </summary>
-        protected virtual void OnFound()
+        protected virtual void OnUpdatesFound()
         {
-            Found?.Invoke(this, EventArgs.Empty);
+            UpdatesFound?.Invoke(this, EventArgs.Empty);
+            EnsureUpdateStarted();
         }
 
         /// <summary>
         /// 没有发现更新
         /// </summary>
-        public event EventHandler NoFound;
+        public event EventHandler NoUpdatesFound;
         /// <summary>
-        /// 引发 <see cref="NoFound"/> 事件
+        /// 引发 <see cref="NoUpdatesFound"/> 事件
         /// </summary>
-        protected virtual void OnNoFound()
+        protected virtual void OnNoUpdatesFound()
         {
             if (PeekNextServer())
             {
@@ -69,8 +70,22 @@ namespace Iwenli.DotNetUpgrade
             else
             {
                 Trace.TraceWarning("尝试更新时出现服务器错误，且服务器已遍历完成。");
-                NoFound?.Invoke(this, EventArgs.Empty);
+                NoUpdatesFound?.Invoke(this, EventArgs.Empty);
             }
+        }
+
+        /// <summary>
+        /// 更新操作已经被用户取消
+        /// </summary>
+        public event EventHandler UpdateCancelled;
+
+        /// <summary>
+        /// 引发 <see cref="UpdateCancelled" /> 事件
+        /// </summary>
+        internal virtual void OnUpdateCancelled()
+        {
+            CleanTemp();
+            UpdateCancelled?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
@@ -102,13 +117,13 @@ namespace Iwenli.DotNetUpgrade
         /// <summary>
         /// 检测更新完成
         /// </summary>
-        public event EventHandler CheckCompleted;
+        public event EventHandler CheckUpdateComplete;
         /// <summary>
-        /// 引发 <see cref="CheckCompleted"/> 事件
+        /// 引发 <see cref="CheckUpdateComplete"/> 事件
         /// </summary>
-        protected virtual void OnCheckCompleted()
+        protected virtual void OnCheckUpdateComplete()
         {
-            CheckCompleted?.Invoke(this, EventArgs.Empty);
+            CheckUpdateComplete?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
@@ -122,13 +137,15 @@ namespace Iwenli.DotNetUpgrade
         protected virtual void OnMinmumVersionRequired()
         {
             MinmumVersionRequired?.Invoke(this, EventArgs.Empty);
+            if (Context.MustUpdate)
+                TerminateProcess(this);
         }
 
         /// <summary> 操作进度发生变更 </summary>
 		/// <remarks></remarks>
 		public event EventHandler<ProgressChangedEventArgs> OperationProgressChanged;
 
-        protected virtual void OnOperationProgressChanged(ProgressChangedEventArgs e)
+        public virtual void OnOperationProgressChanged(ProgressChangedEventArgs e)
         {
             Trace.TraceInformation($"当前进度：{e.ProgressPercentage},参数:{e.UserState}");
             OperationProgressChanged?.Invoke(this, e);
@@ -162,21 +179,6 @@ namespace Iwenli.DotNetUpgrade
 
         #endregion
 
-        #region 更新流程
-        /// <summary>
-        /// 正在中止当前进程
-        /// </summary>
-        public static event EventHandler<CancelEventArgs> RequireTerminateProcess;
-
-        /// <summary>
-        /// 引发 <see cref="RequireTerminateProcess" /> 事件
-        /// </summary>
-        /// <param name="ea">包含此事件的参数</param>
-        internal static void OnRequireTerminateProcess(object sender, CancelEventArgs e)
-        {
-            RequireTerminateProcess?.Invoke(sender, e);
-        }
-        #endregion
 
         #region 确定要下载的包
 
@@ -203,20 +205,18 @@ namespace Iwenli.DotNetUpgrade
 
         #region 包下载事件
 
-        ///// <summary> 下载进度发生变化事件 </summary>
-        ///// <remarks></remarks>
-        //public event EventHandler<PackageDownloadProgressChangedEventArgs> DownloadProgressChanged;
+        /// <summary> 下载进度发生变化事件 </summary>
+        /// <remarks></remarks>
+        public event EventHandler<PackageDownloadProgressChangedEventArgs> DownloadProgressChanged;
 
-        ///// <summary>
-        ///// 引发 <see cref="DownloadProgressChanged"/> 事件
-        ///// </summary>
-        ///// <param name="e"></param>
-        //public virtual void OnDownloadProgressChanged(PackageDownloadProgressChangedEventArgs e)
-        //{
-        //    var handler = DownloadProgressChanged;
-
-        //    if (handler != null) handler(this, e);
-        //}
+        /// <summary>
+        /// 引发 <see cref="DownloadProgressChanged"/> 事件
+        /// </summary>
+        /// <param name="e"></param>
+        public virtual void OnDownloadProgressChanged(PackageDownloadProgressChangedEventArgs e)
+        {
+            DownloadProgressChanged?.Invoke(this, e);
+        }
 
         /// <summary> 开始下载指定的包 </summary>
         /// <remarks></remarks>
@@ -281,6 +281,104 @@ namespace Iwenli.DotNetUpgrade
         public virtual void OnPackageDownloadRetried(PackageEventArgs e)
         {
             PackageDownloadRetried?.Invoke(this, e);
+        }
+        #endregion
+
+        #region 更新流程
+        /// <summary>
+        /// 正在中止当前进程
+        /// </summary>
+        public static event EventHandler<CancelEventArgs> RequireTerminateProcess;
+
+        /// <summary>
+        /// 引发 <see cref="RequireTerminateProcess" /> 事件
+        /// </summary>
+        /// <param name="ea">包含此事件的参数</param>
+        internal static void OnRequireTerminateProcess(object sender, CancelEventArgs e)
+        {
+            RequireTerminateProcess?.Invoke(sender, e);
+        }
+
+
+        /// <summary>
+        /// 正在执行安装前进程
+        /// </summary>
+        public event EventHandler ExecuteExternalProcessBefore;
+
+        /// <summary>
+        /// 引发 <see cref="ExecuteExternalProcessBefore" /> 事件
+        /// </summary>
+        protected virtual void OnExecuteExternalProcessBefore()
+        {
+            ExecuteExternalProcessBefore?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// 正在执行安装后进程
+        /// </summary>
+        public event EventHandler ExecuteExternalProcessAfter;
+
+        /// <summary>
+        /// 引发 <see cref="ExecuteExternalProcessAfter" /> 事件
+        /// </summary>
+        protected virtual void OnExecuteExternalProcessAfter()
+        {
+            ExecuteExternalProcessAfter?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// 即将启动外部启动更新进程
+        /// </summary>
+        public event EventHandler ExternalUpdateStart;
+
+        /// <summary>
+        /// 引发 <see cref="ExternalUpdateStart" /> 事件
+        /// </summary>
+        protected virtual void OnExternalUpdateStart()
+        {
+            ExternalUpdateStart?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// 已经启动外部启动更新进程
+        /// </summary>
+        public event EventHandler ExternalUpdateStarted;
+
+        /// <summary>
+        /// 引发 <see cref="ExternalUpdateStart" /> 事件
+        /// </summary>
+        protected virtual void OnExternalUpdateStarted()
+        {
+            ExternalUpdateStarted?.Invoke(this, EventArgs.Empty);
+        }
+        #endregion
+
+        #region 更新流程-解压缩更新包
+
+        /// <summary> 开始解包 </summary>
+        /// <remarks></remarks>
+        public event EventHandler<PackageEventArgs> PackageExtractionBegin;
+
+        /// <summary>
+        /// 引发 <see cref="PackageExtractionBegin" /> 事件
+        /// </summary>
+        /// <param name="ea">包含此事件的参数</param>
+        protected virtual void OnPackageExtractionBegin(PackageEventArgs e)
+        {
+            PackageExtractionBegin?.Invoke(this, e);
+        }
+
+        /// <summary> 解包完成 </summary>
+        /// <remarks></remarks>
+        public event EventHandler<PackageEventArgs> PackageExtractionEnd;
+
+        /// <summary>
+        /// 引发 <see cref="PackageExtractionEnd" /> 事件
+        /// </summary>
+        /// <param name="ea">包含此事件的参数</param>
+        protected virtual void OnPackageExtractionEnd(PackageEventArgs e)
+        {
+            PackageExtractionEnd?.Invoke(this, e);
         }
         #endregion
     }

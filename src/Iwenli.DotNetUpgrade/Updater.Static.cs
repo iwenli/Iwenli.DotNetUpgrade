@@ -55,12 +55,19 @@ namespace Iwenli.DotNetUpgrade
         /// <summary>
 		/// 确认没有重复调用
 		/// </summary>
-		static void CheckInitialized()
+		private static void CheckInitialized()
         {
             if (_instance == null)
                 return;
 
             throw new InvalidOperationException("Updater 已经被初始化。此方法调用之前，不可先调用任何可能会导致Updater被初始化的操作。");
+        }
+
+        private static void Instance_UpdatesFound(object sender, EventArgs e)
+        {
+            var updater = sender as Updater;
+            updater.StartExternalUpdater();
+            updater.EnsureUpdateStarted();
         }
     }
 }

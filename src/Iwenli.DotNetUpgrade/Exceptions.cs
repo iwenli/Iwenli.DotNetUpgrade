@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Iwenli.DotNetUpgrade.Core;
+using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -30,5 +31,26 @@ namespace Iwenli.DotNetUpgrade
             CurrentVersion = currentVersion;
             MinimumVersion = minimumVersion;
         }
+    }
+
+    /// <summary>
+	/// 更新包下载错误异常
+	/// </summary>
+    public class PackageDownloadException : System.ApplicationException, System.Runtime.Serialization.ISerializable
+    {
+
+        /// <summary>
+        ///     Parameterless (default) constructor
+        /// </summary>
+        public PackageDownloadException(params Package[] packages)
+            : base("升级包下载失败")
+        {
+        }
+
+
+        /// <summary> 获得出错的文件包 </summary>
+        /// <value></value>
+        /// <remarks></remarks>
+        public Package[] ErrorPackages { get; private set; }
     }
 }
